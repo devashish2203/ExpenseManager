@@ -1,3 +1,4 @@
+#!/usr/bin/python
 from __future__ import print_function
 import httplib2
 import os
@@ -9,7 +10,8 @@ from oauth2client import client
 from oauth2client import tools
 from pprint import pprint
 import base64
-from enum import Enum
+from transaction import *
+import calculations
 
 try:
     import argparse
@@ -50,76 +52,81 @@ def get_credentials():
         print('Storing credentials to ' + credential_path)
     return credentials
 
-def get_messageText(service, query=''):
+def get_messageIds(service, Bank):
     """ Gets the text of all the messages matching the particular query"""
-    request = service.users().messages().list(userId='me', q=query)
+    request = service.users().messages().list(userId='me', q=Bank.query.value)
     response = request.execute()
-    pprint(response)
     ids = []
+    print(response)
+    #Return is no messages found for query
+    if "messages" not in response:
+        return ids
+
     for obj in response['messages']:
         #print(obj['id'])
+        print(obj)
         ids.append(obj['id'])
-    fetchNext = 'nextPageToken' in response
-    while fetchNext:
+    while 'nextPageToken' in response:
         request = service.users().messages().list_next(request, response)
         response = request.execute()
-        pprint(response)
         for obj in response['messages']:
             #print(obj['id'])
+            print(obj)
             ids.append(obj['id'])
-        fetchNext = 'nextPageToken' in response
 
-    print("There are "+str(len(ids))+" messages")
-    message_text = []
+    print("There are "+str(len(ids))+" messages for "+Bank.name)
+    return ids
 
-    amount = []
-    ccNo = []
-    date = []
-    merchant = []
+def get_TransactionsFromIds(service, ids, Bank):
+    transactions = []
     for mId in ids:
         msg_req = service.users().messages().get(userId='me', id=mId)
         msg_res = msg_req.execute()
+        #print(msg_res['payload'])
         file_data = base64.urlsafe_b64decode(msg_res['payload']['body']['data'].encode('UTF-8'))
-        parsed = parseHTMLforTransactionDetails(file_data)
-        amount.append(parsed.group("amount"))
-        ccNo.append(parsed.group("ccNo"))
-        date.append(parsed.group("date"))
-        merchant.append(parsed.group("merchant"))
+        parsed = parseHTMLforTransactionDetails(file_data, Bank.regexPattern.value)
+        if parsed == None:
+            continue
+        trans = Transaction(parsed, Bank)
+        print(trans)
+        transactions.append(trans)
+    
+    return transactions
 
-    print(amount)
-    return amount
-
-def parseHTMLforTransactionDetails(htmlBody):
+def parseHTMLforTransactionDetails(htmlBody, pattern):
     """ Returns a regex matcher object for the matched pattern"""
-    pattern = re.compile(Pattern.CitiBank.value)
+    pattern = re.compile(pattern)
     #print(htmlBody)
     result = re.search(pattern, htmlBody)
-    if result:
-        print(result.groups())
-    else:
-        print(htmlBody)
+    
+    if not result:
+        print("No Pattern Match Found")
+        #print(htmlBody)
+        return None
+
     #print(result.groups())
     #print(result.group("merchant").strip()[:-1])
     return result
 
 
-
 def main():
-    """Shows basic usage of the Gmail API.
-
-    Creates a Gmail API service object and outputs a list of label names
-    of the user's Gmail account.
-    """
+    
     credentials = get_credentials()
     http = credentials.authorize(httplib2.Http())
     service = discovery.build('gmail', 'v1', http=http)
 
-    message_list = get_messageText(service, 'from:citialert.india@citicorp.com subject:Transaction Confirmation')
+    transactions = []
+    for BankEnum in BankDetails:
+        print("Serching for "+BankEnum.name)
+        message_ids = get_messageIds(service, BankEnum.value)
+        transactions+=get_TransactionsFromIds(service, message_ids, BankEnum.value)
+        print(len(transactions))
+
+        bucket = calculations.getTotalSpendsByMonth(transactions)
+        print(bucket)
+        print("Total Spends: "+str(calculations.getTotalSpends(transactions)))
     #message_list = get_messageText(service, 'airtel')
     #pprint(message_list)
 
-
-class Pattern(Enum):
-    CitiBank = "Rs (?P<amount>[\d,]+\.\d{2}).*(?P<ccNo>\d{4}X{8}\d{4}) on (?P<date>.*) at (?P<merchant>.*)"
 if __name__ == '__main__':
     main()
