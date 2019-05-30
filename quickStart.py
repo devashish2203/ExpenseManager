@@ -3,21 +3,16 @@ from __future__ import print_function
 import httplib2
 import os
 import re
+import pickle
 
-from apiclient import discovery
-import oauth2client
-from oauth2client import client
-from oauth2client import tools
+from googleapiclient import discovery
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from pprint import pprint
 import base64
 from transaction import *
 import calculations
-
-try:
-    import argparse
-    flags = argparse.ArgumentParser(parents=[tools.argparser]).parse_args()
-except ImportError:
-    flags = None
+import argparse
 
 SCOPES = 'https://www.googleapis.com/auth/gmail.readonly'
 CLIENT_SECRET_FILE = 'client_secret.json'
@@ -37,19 +32,26 @@ def get_credentials():
     credential_dir = os.path.join(home_dir, '.credentials')
     if not os.path.exists(credential_dir):
         os.makedirs(credential_dir)
-    credential_path = os.path.join(credential_dir,
-                                   'gmail-python-quickstart.json')
+    credentials_path_pickle = os.path.join(credential_dir,
+                                   'gmail-python-quickstart.pickle')
+    
+    credentials = None
+    if os.path.exists(credentials_path_pickle):
+        with open(credentials_path_pickle, "rb") as token:
+            credentials = pickle.load(token)
+    if not credentials or not credentials.valid:
+        if credentials and credentials.expired and credentials.refresh_token:
+            credentials.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(CLIENT_SECRET_FILE, SCOPES)
+            credentials = flow.run_local_server()
 
-    store = oauth2client.file.Storage(credential_path)
-    credentials = store.get()
-    if not credentials or credentials.invalid:
-        flow = client.flow_from_clientsecrets(CLIENT_SECRET_FILE, SCOPES)
-        flow.user_agent = APPLICATION_NAME
-        if flags:
-            credentials = tools.run_flow(flow, store, flags)
-        else: # Needed only for compatibility with Python 2.6
-            credentials = tools.run(flow, store)
-        print('Storing credentials to ' + credential_path)
+        with open(credentials_path_pickle, 'wb') as token:
+            pickle.dump(credentials, token)
+        
+
+
+    
     return credentials
 
 def get_messageIds(service, Bank):
@@ -79,16 +81,20 @@ def get_messageIds(service, Bank):
 
 def get_TransactionsFromIds(service, ids, Bank):
     transactions = []
+    count = 500
     for mId in ids:
+        count = count - 1
+        if count == 0:
+            break
         msg_req = service.users().messages().get(userId='me', id=mId)
         msg_res = msg_req.execute()
         #print(msg_res['payload'])
-        file_data = base64.urlsafe_b64decode(msg_res['payload']['body']['data'].encode('UTF-8'))
+        file_data = base64.urlsafe_b64decode(msg_res['payload']['body']['data']).decode()
         parsed = parseHTMLforTransactionDetails(file_data, Bank.regexPattern.value)
         if parsed == None:
             continue
         trans = Transaction(parsed, Bank)
-        print(trans)
+        print(count, trans)
         transactions.append(trans)
     
     return transactions
@@ -112,8 +118,7 @@ def parseHTMLforTransactionDetails(htmlBody, pattern):
 def main():
     
     credentials = get_credentials()
-    http = credentials.authorize(httplib2.Http())
-    service = discovery.build('gmail', 'v1', http=http)
+    service = discovery.build('gmail', 'v1', credentials=credentials)
 
     transactions = []
     for BankEnum in BankDetails:
@@ -121,7 +126,6 @@ def main():
         message_ids = get_messageIds(service, BankEnum.value)
         transactions+=get_TransactionsFromIds(service, message_ids, BankEnum.value)
         print(len(transactions))
-
         bucket = calculations.getTotalSpendsByMonth(transactions)
         print(bucket)
         print("Total Spends: "+str(calculations.getTotalSpends(transactions)))
